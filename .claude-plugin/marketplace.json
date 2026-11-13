@@ -1,0 +1,6 @@
+{
+  "name": "4vex-de",
+  "owner": { "name": "Marco Hallmeier" },
+  "description": "Plugins by 4vex",
+  "plugins": [{ "name": "session-board", "source": "./" }]
+}

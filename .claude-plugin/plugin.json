@@ -1,0 +1,17 @@
+{
+  "name": "session-board",
+  "displayName": "Session Board",
+  "version": "1.2.0",
+  "description": "Live overview of your desktop sessions: what is running, what needs your decision, what is ready for review, grouped like your sidebar. Open any session with one click.",
+  "author": { "name": "Marco Hallmeier" },
+  "license": "MIT",
+  "homepage": "https://github.com/4vex-de/session-board",
+  "repository": "https://github.com/4vex-de/session-board",
+  "keywords": ["sessions", "overview", "status", "dashboard", "desktop"],
+  "icon": "./assets/icon.png",
+  "documentationUrl": "https://github.com/4vex-de/session-board#readme",
+  "supportUrl": "https://github.com/4vex-de/session-board/issues",
+  "privacyPolicyUrl": "https://github.com/4vex-de/session-board/blob/main/PRIVACY.md",
+  "termsOfServiceUrl": "https://github.com/4vex-de/session-board/blob/main/LICENSE",
+  "types": "./types/index.d.ts"
+}
