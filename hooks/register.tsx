@@ -9,7 +9,7 @@ const DAY = 24 * 3600 * 1000
 const WEEK = 7 * DAY
 
 const stand = atom({ plugin: 'session-board', key: 'stand' } as const, { at: 0, error: '', sessions: [] } as Stand, {
-  shape: 'stand-3',
+  shape: 'stand-4',
 })
 
 const filter = atom({ plugin: 'session-board', key: 'filter' } as const, 'alle', { shape: 'filter-1' })
@@ -27,6 +27,7 @@ const TEXTE = {
     review: 'Bitte prüfen',
     done: 'Erledigt',
     idle: 'Steht',
+    bg: 'Hintergrund',
     oeffnen: 'Öffnen',
     aktualisieren: '↻ Aktualisieren',
     aktualisiert: 'Aktualisiert',
@@ -51,6 +52,7 @@ const TEXTE = {
     review: 'Ready for review',
     done: 'Done',
     idle: 'Idle',
+    bg: 'Background',
     oeffnen: 'Open',
     aktualisieren: '↻ Refresh',
     aktualisiert: 'Refreshed',
@@ -66,7 +68,7 @@ const TEXTE = {
 }
 
 type Sprache = keyof typeof TEXTE
-type Umgebung = { system: 'windows' | 'mac' | 'linux'; basen: string[]; sprache: Sprache }
+type Umgebung = { system: 'windows' | 'mac' | 'linux'; basen: string[]; sprache: Sprache; home: string }
 
 type Roh = {
   sessionId: string
@@ -105,6 +107,8 @@ let pfade: Record<string, string> = {}
 let wurzeln: string[] | undefined
 let umgebung: Umgebung | undefined
 let laden: (() => Promise<void>) | undefined
+let protokolle: Record<string, { pfad: string; mtime: number }> = {}
+const hintergrundCache: Record<string, { mtime: number; laufend: number }> = {}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -130,7 +134,13 @@ export const register: Register = on => {
           } catch {
             // Sprache bleibt Deutsch
           }
-          return { system: 'windows', basen: [pfad.replace(/\\/g, '/') + '/Claude-Data'], sprache }
+          const profil = await $.process.run(['cmd.exe', '/d', '/c', 'echo %USERPROFILE%'])
+          return {
+            system: 'windows',
+            basen: [pfad.replace(/\\/g, '/') + '/Claude-Data'],
+            sprache,
+            home: profil.stdout.trim().replace(/\\/g, '/'),
+          }
         }
       } catch {
         // kein Windows
@@ -149,9 +159,15 @@ export const register: Register = on => {
           system: 'mac',
           basen: [home + '/Library/Application Support/Claude', home + '/Library/Application Support/Claude-Data'],
           sprache,
+          home,
         }
       }
-      return { system: 'linux', basen: [home + '/.config/Claude', home + '/.config/Claude-Data'], sprache: spracheAus(lang ?? '') }
+      return {
+        system: 'linux',
+        basen: [home + '/.config/Claude', home + '/.config/Claude-Data'],
+        sprache: spracheAus(lang ?? ''),
+        home,
+      }
     }
 
     umgebung ??= await umgebungErmitteln()
@@ -196,12 +212,78 @@ export const register: Register = on => {
 
     const statusLesen = async (id: string) => {
       const pfad = pfade[id]
-      if (!pfad) return { status: '', hint: '' }
+      if (!pfad) return { status: '', hint: '', cli: '' }
       try {
         const text = await $.fs.read(pfad)
-        return { status: feld(text, 'status_category'), hint: feld(text, 'needs_action') }
+        return {
+          status: feld(text, 'status_category'),
+          hint: feld(text, 'needs_action'),
+          cli: feld(text, 'cliSessionId'),
+        }
       } catch {
-        return { status: '', hint: '' }
+        return { status: '', hint: '', cli: '' }
+      }
+    }
+
+    // Protokoll der Sitzung: eine Hintergrundaufgabe gilt als laufend, solange ihr Start ohne Abschlussmeldung steht.
+    const protokolleIndexieren = async () => {
+      const map: Record<string, { pfad: string; mtime: number }> = {}
+      try {
+        const projekte = (umgebung?.home ?? '') + '/.claude/projects'
+        for (const a of await $.fs.list(projekte)) {
+          if (a.kind !== 'dir') continue
+          for (const f of await $.fs.list(projekte + '/' + a.name)) {
+            if (f.kind === 'file' && f.name.endsWith('.jsonl')) {
+              map[f.name.slice(0, -6)] = { pfad: projekte + '/' + a.name + '/' + f.name, mtime: f.mtimeMs }
+            }
+          }
+        }
+      } catch {
+        // ohne Protokolle keine Hintergrundanzeige
+      }
+      protokolle = map
+    }
+
+    const hintergrund = async (cli: string, now: number): Promise<number> => {
+      const eintrag = protokolle[cli]
+      if (!eintrag || now - eintrag.mtime > DAY) return 0
+      const alt = hintergrundCache[eintrag.pfad]
+      if (alt && alt.mtime === eintrag.mtime) return alt.laufend
+      const argv =
+        umgebung?.system === 'windows'
+          ? [
+              'powershell.exe',
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              "Select-String -LiteralPath '" +
+                eintrag.pfad.replace(/'/g, "''") +
+                "' -Pattern '[^\\\\]\\x22backgroundTaskId\\x22:\\x22[a-z0-9]{6,12}\\x22','<task-id>[a-z0-9]{6,12}</task-id>','TaskStop\\x22,\\x22input\\x22:\\{\\x22(task_id|shell_id)\\x22:\\x22[a-z0-9]{6,12}\\x22' -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { $_.Value }",
+            ]
+          : [
+              'grep',
+              '-oE',
+              '[^\\\\]"backgroundTaskId":"[a-z0-9]{6,12}"|<task-id>[a-z0-9]{6,12}</task-id>|TaskStop","input":\\{"(task_id|shell_id)":"[a-z0-9]{6,12}"',
+              eintrag.pfad,
+            ]
+      try {
+        const r = await $.process.run(argv, { timeoutMs: 20000 })
+        const gestartet = new Set<string>()
+        const fertig = new Set<string>()
+        for (const zeileText of r.stdout.split(/\r?\n/)) {
+          const start = /backgroundTaskId":"([a-z0-9]{6,12})"/.exec(zeileText)
+          if (start) gestartet.add(start[1])
+          const ende = /<task-id>([a-z0-9]{6,12})<\/task-id>/.exec(zeileText)
+          if (ende) fertig.add(ende[1])
+          const gestoppt = /^TaskStop.*"([a-z0-9]{6,12})"$/.exec(zeileText)
+          if (gestoppt) fertig.add(gestoppt[1])
+        }
+        let laufend = 0
+        for (const id of gestartet) if (!fertig.has(id)) laufend++
+        hintergrundCache[eintrag.pfad] = { mtime: eintrag.mtime, laufend }
+        return laufend
+      } catch {
+        return 0
       }
     }
 
@@ -214,11 +296,13 @@ export const register: Register = on => {
         }
         const list = JSON.parse(block.text) as Roh[]
         await indexieren()
+        await protokolleIndexieren()
         const now = await $.clock.now()
         const sessions: Sitzung[] = []
         for (const s of list) {
           if (now - Date.parse(s.lastActivityAt) >= WEEK) continue
           const st = await statusLesen(s.sessionId)
+          const bg = st.cli ? await hintergrund(st.cli, now) : 0
           sessions.push({
             id: s.sessionId,
             title: s.title,
@@ -228,6 +312,7 @@ export const register: Register = on => {
             link: s.link ?? 'claude://claude.ai/epitaxy/' + s.sessionId,
             status: st.status,
             hint: st.hint,
+            bg,
           })
         }
         await update($, stand, () => ({ at: now, error: '', sessions }))
@@ -271,6 +356,7 @@ export const register: Register = on => {
       idle: { icon: '●', color: 'inactive', rang: 4 },
     } as const
     const zahl = (k: keyof typeof ART) => s.sessions.filter(x => art(x) === k).length
+    const rang = (x: Sitzung) => (art(x) !== 'run' && x.bg > 0 ? 0.5 : ART[art(x)].rang)
 
     const waehlen = (k: string) => {
       void update($, filter, alt => (alt === k ? 'alle' : k))
@@ -308,6 +394,11 @@ export const register: Register = on => {
           <Box flexDirection="row" gap={1}>
             <Button key={'oeffnen-' + x.id} label={t.oeffnen} onPress={() => oeffnen(x.link)} />
             <Text color={a.color}>{a.icon}</Text>
+            {x.bg > 0 && (
+              <Text color="permission">
+                ⚙ {x.bg} {t.bg}
+              </Text>
+            )}
             <Text>{x.title}</Text>
             <Text dimColor>{zeit(Date.parse(x.last), sprache)}</Text>
           </Box>
@@ -316,7 +407,12 @@ export const register: Register = on => {
       )
     }
 
-    const sichtbar = gewaehlt === 'alle' ? s.sessions : s.sessions.filter(x => art(x) === gewaehlt)
+    const sichtbar =
+      gewaehlt === 'alle'
+        ? s.sessions
+        : gewaehlt === 'bg'
+          ? s.sessions.filter(x => x.bg > 0)
+          : s.sessions.filter(x => art(x) === gewaehlt)
     const gruppen: Record<string, Sitzung[]> = {}
     for (const x of sichtbar) (gruppen[x.group] ??= []).push(x)
     const namen = Object.keys(gruppen).sort((a, b) =>
@@ -337,6 +433,12 @@ export const register: Register = on => {
             {t.alle} {s.sessions.length}
           </Button>
           {kachel('run')}
+          <Button key="filter-bg" variant={gewaehlt === 'bg' ? 'primary' : undefined} onPress={() => waehlen('bg')}>
+            <Text bold color="permission">
+              ⚙ {s.sessions.filter(x => x.bg > 0).length}
+            </Text>
+            <Text> {t.bg}</Text>
+          </Button>
           {kachel('blocked')}
           {kachel('review')}
           {kachel('done')}
@@ -356,9 +458,9 @@ export const register: Register = on => {
         {sichtbar.length === 0 && <Text dimColor>{t.leer}</Text>}
         {namen.map(n => {
           const liste = [...gruppen[n]].sort(
-            (a, b) => ART[art(a)].rang - ART[art(b)].rang || Date.parse(b.last) - Date.parse(a.last),
+            (a, b) => rang(a) - rang(b) || Date.parse(b.last) - Date.parse(a.last),
           )
-          const offen = liste.filter(x => ['run', 'blocked', 'review'].includes(art(x))).length
+          const offen = liste.filter(x => x.bg > 0 || ['run', 'blocked', 'review'].includes(art(x))).length
           return (
             <Box key={'gruppe-' + n} flexDirection="column">
               <Text bold>

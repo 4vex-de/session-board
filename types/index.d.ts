@@ -7,6 +7,7 @@ export type Sitzung = {
   link: string
   status: string
   hint: string
+  bg: number
 }
 
 export type Stand = { at: number; error: string; sessions: Sitzung[] }
